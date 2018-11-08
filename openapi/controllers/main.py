@@ -7,9 +7,11 @@ import logging
 from collections import OrderedDict
 
 import werkzeug
+
 from odoo import http
 from odoo.addons.web_settings_dashboard.controllers.main \
     import WebSettingsDashboard
+from odoo.addons.web.controllers.main import ensure_db
 
 from odoo.addons.openapi.controllers import pinguin
 
@@ -50,12 +52,14 @@ class OpenapiWebSettingsDashboard(WebSettingsDashboard):
 class OAS(http.Controller):
 
     @http.route('/api/v1/<namespace_name>/swagger.json',
-                type='http', auth='public', csrf=False)
+                type='http', auth='none')
     def OAS_json_spec_download(self, namespace_name, **kwargs):
+        print(123)
+        ensure_db()
         namespace = http.request.env['openapi.namespace'].search([('name', '=', namespace_name)])
         if not namespace:
             raise werkzeug.exceptions.NotFound()
-        if not pinguin.authenticate_token_for_namespace(namespace, kwargs.get('token')):
+        if namespace.token != kwargs.get('token'):
             raise werkzeug.exceptions.Forbidden()
 
         spec = namespace.get_OAS_part()

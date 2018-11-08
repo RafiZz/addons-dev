@@ -2,6 +2,7 @@
 # Copyright 2018 Ivan Yelizariev <https://it-projects.info/team/yelizariev>
 # Copyright 2018 Rafis Bikbov <https://it-projects.info/team/bikbov>
 # License LGPL-3.0 or later (http://www.gnu.org/licenses/lgpl.html).
+import collections
 import urllib
 import urlparse
 import uuid
@@ -39,7 +40,9 @@ class Namespace(models.Model):
         string='Latest usage'
     )
 
-    access_ids = fields.One2many('openapi.access', 'namespace_id', string='Accesses', context={'active_test': False})
+    access_ids = fields.One2many('openapi.access', 'namespace_id', string='Accesses',
+                                 # context={'active_test': False}
+                                 )
     user_ids = fields.Many2many('res.users', string='Allowed Users', default=lambda self: self.env.user)
 
     token = fields.Char('Identification token',
@@ -81,28 +84,108 @@ class Namespace(models.Model):
         current_host = self.env['ir.config_parameter'].sudo().get_param('web.base.url')
         parsed_current_host = urlparse.urlparse(current_host)
 
-        for record in self:
-            spec = {
-                "swagger": "2.0",
-                "info": {
-                    "title": "Swagger Sample App",
-                    "version": "1.0.0"
-                },
-                "host": parsed_current_host.netloc,
-                "basePath": "/api/v1/%s" % record.name,
-                "schemes": [
-                    parsed_current_host.scheme
-                ],
-            }
-            for openapi_access in record.access_ids.filtered('active'):
-                pinguin.update(spec, openapi_access.get_OAS_part())
 
-            return spec
+        spec = collections.OrderedDict([
+            ('swagger', '2.0'),
+            ('info', {
+                "title": "Swagger Sample App",
+                "version": "1.0.0"
+            }),
+            ('host', parsed_current_host.netloc),
+            ('basePath', "/api/v1/%s" % self.name),
+            ('schemes', [
+                parsed_current_host.scheme
+            ]),
+            ('consumes', [
+                "multipart/form-data",
+                "application/x-www-form-urlencoded",
+            ]),
+            ('produces', [
+                "application/json"
+            ]),
+            ('definitions', {
+                "ErrorResponse": {
+                    "type": "object",
+                    "required": [
+                        "error",
+                        "error_descrip"
+                    ],
+                    "properties": {
+                        "error": {
+                            "type": "string"
+                        },
+                        "error_descrip": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "MethodParams-single_record": {
+                    "type": "object",
+                    "properties": {
+                        "method_params": {
+                            "type": "string"
+                        }
+                    },
+                    "example": {
+                        "method_params": "{\"vals\": {\"name\": \"changed from 'write' method which call from api\"}}"
+                    }
+                },
+                "MethodParams-recordset": {
+                    "type": "object",
+                    "properties": {
+                        "ids": {
+                            "type": "string"
+                        },
+                        "method_params": {
+                            "type": "string"
+                        }
+                    },
+                    "example": {
+                        "ids": "[8, 18, 33, 23, 22]",
+                        "method_params": "{\"vals\": {\"name\": \"changed from 'write' method which call from api\"}}"
+                    }
+                },
+            }),
+            # parameters: {} TODO:
+            # TODO: доделать про возможные ответы
+            ('responses', {
+                "401": {
+                    "description": "Authentication information is missing or invalid",
+                    "schema": {
+                        "$ref": "#/definitions/ErrorResponse"
+                    }
+                },
+                "500": {
+                    "description": "Server Error",
+                    "schema": {
+                        "$ref": "#/definitions/ErrorResponse"
+                    }
+                }
+            }),
+            ('securityDefinitions', {
+                'basicAuth': {
+                    'type': 'basic'
+                }
+            }),
+            ('security', [
+                {'basicAuth': []}
+            ]),
+            ('tags', [])
+        ])
+
+
+        for openapi_access in self.access_ids.filtered('active'):
+            OAS_part_for_model = openapi_access.get_OAS_part()
+            spec['tags'].append(OAS_part_for_model['tag'])
+            del OAS_part_for_model['tag']
+            pinguin.update(spec, OAS_part_for_model)
+
+        return spec
 
     @api.depends('name', 'token')
     def _compute_spec_url(self):
         for record in self:
-            record.spec_url = "/api/v1/%s/swagger.json?token=%s" % (record.name, record.token)
+            record.spec_url = "/api/v1/%s/swagger.json?token=%s&db=%s" % (record.name, record.token, self._cr.dbname)
 
     def reset_token(self):
         for record in self:

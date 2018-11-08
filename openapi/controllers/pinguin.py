@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright 2018, XOE Solutions
+# Copyright 2018 Rafis Bikbov <https://it-projects.info/team/bikbov>
 # License LGPL-3.0 or later (http://www.gnu.org/licenses/lgpl.html).
 
 """Pinguin module for Odoo REST Api.
@@ -118,38 +119,6 @@ def error_response(status, error, error_descrip):
 ##########################
 
 
-# Server wide auth
-def authenticate_token_for_server(token):
-    """Extract and validate the encoded server salt conveyed by the token.
-
-    :param str token: The raw access token.
-
-    :returns: **True** if server accepts the token, **False** otherwise.
-    :rtype: bool
-    """
-    return True  # TODO
-
-
-# Database detection
-def infer_database(token):
-    """Extract and validate the encoded database information
-    conveyed by the token.
-
-    :param str token: The raw access token.
-
-    :returns: The database name in clear text.
-    :rtype: str
-
-    Todo:
-        - Validate against registries of the current thread.
-        - Do NOT init a new registry by default, even if database exists.
-        - Only load the registry if we are on a special API serving worker
-          with lower than regular HTTP worker priority (nice=5)
-    """
-
-    return 'test'  # TODO
-
-
 # User token auth (db-scoped)
 def authenticate_token_for_user(token):
     """Authenticate against the database and setup user session corresponding to the token.
@@ -166,19 +135,6 @@ def authenticate_token_for_user(token):
         request.session.uid = user.id
         return user
     raise werkzeug.exceptions.HTTPException(response=error_response(*CODE__no_user_auth))
-
-
-# Namespace token auth (db-scoped)
-def authenticate_token_for_namespace(namespace, token):
-    """Validate token against the requested namespace.
-
-    :param openapi.namespace namespace: The requested namespace.
-    :param str token: The raw access token.
-
-    :returns: **True** if token is authorized for the requested namespace, **False** otherwise.
-    :rtype: bool
-    """
-    return namespace.token == token
 
 
 def get_auth_header(headers, raise_exception=False):
@@ -295,21 +251,21 @@ def create_log_record(namespace, user, user_request, user_response):
     :rtype: ..models.openapi_log.Log
     """
     request_data = None
-    if namespace.log_request == 'full':
+    if namespace['log_request']== 'full':
         request_data = user_request.get_data()
-    elif namespace.log_request == 'info':
+    elif namespace['log_request']== 'info':
         # TODO: only info
         request_data = user_request.get_data()
 
     response_data = None
-    if namespace.log_response == 'debug':
+    if namespace['log_response']== 'debug':
         response_data = user_response.get_data()
-    elif namespace.log_response == 'error' and user_response.status_code > 400:
+    elif namespace['log_response']== 'error' and user_response.status_code > 400:
         response_data = user_response.get_data()
 
     # TODO: log data depend on namespace settings
     log = request.env['openapi.log'].sudo(user).create({
-        'namespace_id': namespace.id,
+        'namespace_id': namespace['id'],
         'request': '%s | %s | %d' % (user_request.url, user_request.method, user_response.status_code),
         'request_data': request_data,
         'response_data': response_data,
@@ -329,27 +285,28 @@ def route(*args, **kwargs):
 
     :returns: wrapped method
     """
-    def decorator(f):
+    def decorator(controller_method):
 
         @http_route(*args, **kwargs)
-        @functools.wraps(f)
+        @functools.wraps(controller_method)
         def controller_method_wrapper(*iargs, **ikwargs):
+            print(request.httprequest.headers)
             auth_header = get_auth_header(request.httprequest.headers, raise_exception=True)
             user_token = get_data_from_auth_header(auth_header)['user_token']
             authenticated_user = authenticate_token_for_user(user_token)
             namespace = get_namespace_by_name_from_users_namespaces(authenticated_user, ikwargs['namespace'], raise_exception=True)
 
             try:
-                response = f(*iargs, **ikwargs)
+                response = controller_method(*iargs, **ikwargs)
             except werkzeug.exceptions.HTTPException as e:
                 response = e
             except Exception as e:
                 response = error_response(
-                    status=400,
+                    status=500,
                     error=type(e).__name__,
                     error_descrip=e.name if hasattr(e, 'name') else str(e)
                 )
-                print(response.__dict__)
+            # print(response.__dict__)
 
             create_log_record(
                 namespace=namespace,
@@ -357,6 +314,7 @@ def route(*args, **kwargs):
                 user_request=request.httprequest,
                 user_response=response
             )
+
             return response
 
         return controller_method_wrapper
@@ -414,7 +372,7 @@ def get_model_openapi_access(namespace, model):
 
     We validate the namespace at this latter stage, because it forms part of the http route.
     The token has been related to a namespace already previously
-    (:meth:`authenticate_token_for_namespace`).
+    (:meth:`authenticate_token_for_namespace`).  TODO: remove all about authenticate_token_for_namespace
 
     This is a double purpose method.
 
@@ -459,7 +417,7 @@ def get_model_openapi_access(namespace, model):
 
     # TODO write transformation
     res = {
-        'context': {}, # Take ot here FIXME: make sure it is for create_context
+        'context': {},  # Take ot here FIXME: make sure it is for create_context
         'out_fields_read_multi': (),
         'out_fields_read_one': (),
         'out_fields_create_one': (),  # FIXME: for what?
@@ -580,7 +538,7 @@ def update(d, u):
     """
     for k, v in u.items():
         if isinstance(v, collections.Mapping):
-            d[k] = update(d.get(k, {}), v)
+            d[k] = update(d.get(k, collections.OrderedDict([])), v)
         else:
             d[k] = v
     return d
@@ -673,7 +631,11 @@ def wrap__resource__create_one(modelname, context, data, success_code, out_field
     """
     # FIXME: What fields do we accept when creating/updating requests?
     model_obj = get_model_for_read(modelname)
-    created_obj = model_obj.with_context(context).create(data)
+    try:
+        created_obj = model_obj.with_context(context).create(data)
+    except Exception as e:
+        return error_response(400, type(e).__name__, str(e))
+
     out_data = get_dict_from_record(created_obj, out_fields, (), ())
     return successful_response(success_code, out_data)
 
@@ -688,7 +650,6 @@ def wrap__resource__read_all(modelname, success_code, out_fields):
     :returns: The werkzeug `response object`_.
     :rtype: werkzeug.wrappers.Response
     """
-    # record_set.openapi_export_data(export_fields_read_one)
     data = get_dictlist_from_model(modelname, out_fields)
     return successful_response(success_code, data)
 
@@ -723,7 +684,10 @@ def wrap__resource__update_one(modelname, id, success_code, data):
     record = request.env(cr, uid)[modelname].browse(id)
     if not record.exists():
         return error_response(*CODE__obj_not_found)
-    record.write(data)
+    try:
+        record.write(data)
+    except Exception as e:
+        return error_response(400, type(e).__name__, str(e))
     return successful_response(success_code)
 
 
@@ -932,7 +896,11 @@ def get_dict_from_record(record, spec, include_fields, exclude_fields):
                                                         field[1], (), ())
         # Normal field, or unspecified relational
         elif isinstance(field, six.string_types):
-            result[field] = getattr(record, field)
+            if not hasattr(record, field):
+                raise odoo.exceptions.ValidationError(odoo._('The model "%s" has no such field: "%s".') % (record._name, field))
+
+            # result[field] = getattr(record, field)
+            result[field] = record[field]
             fld = record._fields[field]
             if fld.relational:
                 if fld.type.endswith('2one'):
@@ -1072,19 +1040,21 @@ def get_OAS_definitions_part(model_obj, export_fields_dict, definition_prefix=''
         if child_fields:
             child_model = model_obj.env[meta['relation']]
             child_definition = get_OAS_definitions_part(child_model, child_fields, definition_prefix=definition_name)
-            definitions.update(child_definition)
-            child_definition_ref = "#/definitions/%s" % get_definition_name(child_model._name, prefix=definition_name)
+            # definitions.update(child_definition)
+            # child_definition_ref = "#/definitions/%s" % get_definition_name(child_model._name, prefix=definition_name)
 
             if meta['type'].endswith('2one'):
-                field_property = {
-                    '$ref': child_definition_ref
-                }
+                field_property = child_definition[get_definition_name(child_model._name, prefix=definition_name)]
+                # field_property = {
+                #     '$ref': child_definition_ref
+                # }
             else:
                 field_property = {
                     'type': 'array',
-                    'items': {
-                        '$ref': child_definition_ref
-                    }
+                    # 'items': {
+                    #     '$ref': child_definition_ref
+                    # }
+                    'items': child_definition[get_definition_name(child_model._name, prefix=definition_name)]
                 }
         else:
             field_property = {

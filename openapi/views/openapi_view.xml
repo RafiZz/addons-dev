@@ -54,6 +54,7 @@
                         <page string="Accessable Models">
                             <field name="access_ids"
                                    mode="tree"
+                                   context="{'active_test': False}"
                             >
                                 <form string="Namespaces Accessable Models">
                                     <sheet>
